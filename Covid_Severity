@@ -1,0 +1,109 @@
+
+## Alaleh Azhir
+# 9/2022
+# The data is obtained through linking MGB Covid-19 Mart and Covid-19 vaccine registry, not publicly available
+
+# Define your case cohort
+study.dat = study.months.dat
+
+# Import Library
+library(wesanderson)
+library(ggpmisc)
+library(hrbrthemes)
+library(ggpubr)
+library(ggalt)
+library(survey)
+library(svglite)
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(data.table, devtools, backports, Hmisc, tidyr,dplyr,ggplot2,plyr,scales,readr,cobalt,WeightIt,survey,
+               httr, DT, lubridate, tidyverse,reshape2,foreach,doParallel,caret,gbm,lubridate,praznik,MatchIt)
+
+
+### Define glm data
+glm.dat <- dplyr::select(study.dat,female,age,race,hispanic,vaccine_status,
+        mortality,hospitalization,ventilation,icu,era,Onset,elixhauser_index,prior_infection,Paxlovid,Remdesivir,Steroids)
+
+## The function to run the analysis
+outglm <- function(outcome,#outcome of interest
+                   dat.aoi,#data for modeling
+                   group,
+                   vax = F
+                   
+){
+  
+  dat.aoi$label <- as.factor(dat.aoi[,which(colnames(dat.aoi)==outcome)])
+  dat.aoi$label <- ifelse(dat.aoi$label == "N",0,1)
+  
+  if(vax){ # do not account for vaccination status, if stratified by this variable
+    dat.aoi <- dat.aoi[,c(1:4,10,12:16)]
+    
+    # weight it function - change this to era ~ 1 to not adjust for covariates
+    W.out <- weightit(era ~ hispanic+race+age+female+elixhauser_index  
+                      +prior_infection+anti.viral+Steroids,
+                      data = dat.aoi, estimand = "ATE" , method = "ebal")
+  } else{
+    dat.aoi <- dat.aoi[,c(1:5,10,12:16)]
+    
+    # weight it function - change this to era ~ 1 to not adjust for covariates
+    W.out <- weightit(era ~ hispanic+race+age+female+elixhauser_index  
+                      +prior_infection+anti.viral+Steroids,
+                      data = dat.aoi, estimand = "ATE" , method = "ebal")
+  }
+  
+  
+  bal <- bal.tab(W.out, stats = c("m", "v", "ks"), m.threshold = .05, disp.v.ratio = TRUE,poly = 3)
+  bal2 <- bal.tab(W.out, stats = c("m"), m.threshold = .05, disp.v.ratio = TRUE,poly = 3)
+ 
+  dat.aoi.w <- svydesign(~1, weights = W.out$weights, data = dat.aoi)
+  
+  logitMod <- svyglm(label ~ era, 
+                     design = dat.aoi.w, family=quasibinomial(link="logit"))
+
+  summary <- summary(logitMod)
+  
+  lreg.or <-exp(cbind(OR = coef(logitMod), confint(logitMod))) ##CIs using profiled log-likelihood
+  output <- data.frame(round(lreg.or, digits=4))
+  
+  output$features <- rownames(output)
+  rownames(output) <- NULL
+  ps <- data.frame(
+    round(
+      coef(summary(logitMod))[,4],4))#P(Wald's test)
+  ps$features <- rownames(ps)
+  rownames(ps) <- NULL
+  output <- merge(output,ps,by="features")
+  output$features <- sub('`', '', output$features, fixed = TRUE)
+  output$features <- sub('`', '', output$features, fixed = TRUE)
+  colnames(output)[3:5] <- c("2.5","97.5","P (Wald's test)")
+  
+  output$outcome <- outcome
+  output$group <- group
+  
+  ###proportions
+  if(vax){
+    pat.agg <- dat.aoi %>% 
+      dplyr::group_by(era,label) %>%
+      dplyr::summarise(patients=n())
+  } else{
+    pat.agg <- dat.aoi %>% 
+      dplyr::group_by(era,vaccine_status,label) %>%
+      dplyr::summarise(patients=n())
+  }
+  
+  pat.agg$outcome <- outcome
+  pat.agg$group <- group
+  
+  rm(logitMod,outcome,group)
+  
+  return(
+    list(ORs= output,
+         summary=summary,
+         counts = pat.agg,
+         balance=bal,
+         bal2=bal2
+    )
+  )
+  
+}
+
+
